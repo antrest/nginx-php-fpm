@@ -1,12 +1,14 @@
-FROM debian:buster
+# Build: masterbeeio/nginx-php-fpm-7.3:v1.1
 
-LABEL maintainer="Colin Wilson colin@wyveo.com"
+FROM debian:buster
+LABEL maintainer="Joe Huang joe@ant.rest"
 
 # Let the container know that there is no tty
 ENV DEBIAN_FRONTEND noninteractive
 ENV NGINX_VERSION 1.19.5-1~buster
 ENV php_conf /etc/php/7.3/fpm/php.ini
 ENV fpm_conf /etc/php/7.3/fpm/pool.d/www.conf
+ENV SWOOLE_VERSION v4.5.10
 ENV COMPOSER_VERSION 1.10.17
 
 # Install Basic Requirements
@@ -37,8 +39,10 @@ RUN buildDeps='curl gcc make autoconf libc-dev zlib1g-dev pkg-config' \
             zip \
             unzip \
             python-pip \
+            build-essential \
             python-setuptools \
             git \
+            g++ \
             libmemcached-dev \
             libmemcached11 \
             libmagickwand-dev \
@@ -60,17 +64,31 @@ RUN buildDeps='curl gcc make autoconf libc-dev zlib1g-dev pkg-config' \
             php7.3-pgsql \
             php7.3-intl \
             php7.3-xml \
-            php-pear \
-    && pecl -d php_suffix=7.3 install -o -f redis memcached \
-    && mkdir -p /run/php \
+            php-pear 
+
+# Install redis and memcached
+RUN pecl -d php_suffix=7.3 install -o -f redis memcached
+
+# Install swoole from git srouce
+RUN cd /tmp \
+    && git clone https://github.com/swoole/swoole-src.git \
+    && cd swoole-src \
+    && git checkout ${SWOOLE_VERSION} \
+    && phpize \
+    && ./configure --enable-openssl --enable-http2 --enable-sockets --enable-mysqlnd --enable-swoole-json\
+    && make \
+    && make install-modules
+
+# Install others and updating php.ini
+RUN mkdir -p /run/php \
     && pip install wheel \
     && pip install supervisor supervisor-stdout \
     && echo "#!/bin/sh\nexit 0" > /usr/sbin/policy-rc.d \
     && rm -rf /etc/nginx/conf.d/default.conf \
     && sed -i -e "s/;cgi.fix_pathinfo=1/cgi.fix_pathinfo=0/g" ${php_conf} \
-    && sed -i -e "s/memory_limit\s*=\s*.*/memory_limit = 256M/g" ${php_conf} \
-    && sed -i -e "s/upload_max_filesize\s*=\s*2M/upload_max_filesize = 100M/g" ${php_conf} \
-    && sed -i -e "s/post_max_size\s*=\s*8M/post_max_size = 100M/g" ${php_conf} \
+    && sed -i -e "s/memory_limit\s*=\s*.*/memory_limit = 512M/g" ${php_conf} \
+    && sed -i -e "s/upload_max_filesize\s*=\s*2M/upload_max_filesize = 200M/g" ${php_conf} \
+    && sed -i -e "s/post_max_size\s*=\s*8M/post_max_size = 200M/g" ${php_conf} \
     && sed -i -e "s/variables_order = \"GPCS\"/variables_order = \"EGPCS\"/g" ${php_conf} \
     && sed -i -e "s/;daemonize\s*=\s*yes/daemonize = no/g" /etc/php/7.3/fpm/php-fpm.conf \
     && sed -i -e "s/;catch_workers_output\s*=\s*yes/catch_workers_output = yes/g" ${fpm_conf} \
@@ -82,9 +100,13 @@ RUN buildDeps='curl gcc make autoconf libc-dev zlib1g-dev pkg-config' \
     && sed -i -e "s/www-data/nginx/g" ${fpm_conf} \
     && sed -i -e "s/^;clear_env = no$/clear_env = no/" ${fpm_conf} \
     && echo "extension=redis.so" > /etc/php/7.3/mods-available/redis.ini \
+    && echo "extension=swoole.so" > /etc/php/7.3/mods-available/swoole.ini \
+    && echo "extension=swoole_loader73.so" > /etc/php/7.3/mods-available/swoole.ini \
     && echo "extension=memcached.so" > /etc/php/7.3/mods-available/memcached.ini \
     && ln -sf /etc/php/7.3/mods-available/redis.ini /etc/php/7.3/fpm/conf.d/20-redis.ini \
     && ln -sf /etc/php/7.3/mods-available/redis.ini /etc/php/7.3/cli/conf.d/20-redis.ini \
+    && ln -sf /etc/php/7.3/mods-available/swoole.ini /etc/php/7.3/fpm/conf.d/20-swoole.ini \
+    && ln -sf /etc/php/7.3/mods-available/swoole.ini /etc/php/7.3/cli/conf.d/20-swoole.ini \
     && ln -sf /etc/php/7.3/mods-available/memcached.ini /etc/php/7.3/fpm/conf.d/20-memcached.ini \
     && ln -sf /etc/php/7.3/mods-available/memcached.ini /etc/php/7.3/cli/conf.d/20-memcached.ini \
     # Install Composer
@@ -95,6 +117,7 @@ RUN buildDeps='curl gcc make autoconf libc-dev zlib1g-dev pkg-config' \
     && rm -rf /tmp/composer-setup.php \
     # Clean up
     && rm -rf /tmp/pear \
+    && rm -rf /tmp/swoole-src \
     && apt-get purge -y --auto-remove $buildDeps \
     && apt-get clean \
     && apt-get autoremove \
@@ -104,10 +127,14 @@ RUN buildDeps='curl gcc make autoconf libc-dev zlib1g-dev pkg-config' \
 ADD ./supervisord.conf /etc/supervisord.conf
 
 # Override nginx's default config
-ADD ./default.conf /etc/nginx/conf.d/default.conf
+# ADD ./default.conf /etc/nginx/conf.d/default.conf
+
+# Add swoole_loader
+ADD ./swoole_loader73.so /usr/lib/php/20180731/swoole_loader73.so
 
 # Override default nginx welcome page
-COPY html /usr/share/nginx/html
+# COPY html /usr/share/nginx/html
+VOLUME ["/usr/share/nginx/html", "/etc/nginx/conf.d/"]
 
 # Add Scripts
 ADD ./start.sh /start.sh
